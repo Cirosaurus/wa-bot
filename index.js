@@ -7,38 +7,70 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // --- KONFIGURASI ---
-// GANTI NOMOR INI DENGAN NOMOR WA YANG AKAN JADI BOT
-// Awali dengan kode negara (62), tanpa spasi atau tanda plus
+// GANTI NOMOR DI SINI (Format: 628xxx)
 const phoneNumber = "6283143826307"; 
+const authFolder = 'auth_info_baileys';
 
 // --- VARIABEL GLOBAL ---
 let pairingCode = null;
 let isConnected = false;
+let sock = null;
 
 // --- 1. SERVER WEB ---
 app.get('/', async (req, res) => {
     res.setHeader('Content-Type', 'text/html');
 
-    if (isConnected) {
-        return res.send('<center><h1>✅ Bot WhatsApp Aktif!</h1></center>');
-    }
+    let content = '';
 
-    if (pairingCode) {
-        return res.send(`
-            <div style="font-family: sans-serif; text-align: center; padding: 20px;">
+    if (isConnected) {
+        content = `
+            <div style="background: #d4edda; color: #155724; padding: 20px; border-radius: 10px; text-align: center;">
+                <h1>✅ Bot WhatsApp Aktif!</h1>
+                <p>Bot sudah terhubung dengan nomor ${phoneNumber}</p>
+            </div>`;
+    } else if (pairingCode) {
+        content = `
+            <div style="text-align: center;">
                 <h1>Kode Pairing Anda:</h1>
-                <div style="background: #f0f0f0; padding: 20px; font-size: 40px; font-weight: bold; letter-spacing: 5px; border-radius: 10px;">
+                <div style="background: #f0f0f0; padding: 15px; font-size: 35px; font-weight: bold; letter-spacing: 5px; border: 2px dashed #333; margin: 20px 0;">
                     ${pairingCode}
                 </div>
-                <p>1. Buka WhatsApp di HP > Perangkat Tertaut > Tautkan Perangkat</p>
-                <p>2. Pilih <b>"Tautkan dengan nomor telepon saja"</b> (di bagian bawah)</p>
+                <p>1. Buka WhatsApp > Perangkat Tertaut > Tautkan Perangkat</p>
+                <p>2. Pilih <b>"Tautkan dengan nomor telepon saja"</b></p>
                 <p>3. Masukkan kode di atas.</p>
-                <script>setTimeout(() => window.location.reload(), 5000);</script>
-            </div>
-        `);
+                <p style="color: red;">*Kode akan berubah setiap kali bot restart</p>
+            </div>`;
+    } else {
+        content = `<h1>⏳ Sedang memproses kode... Tunggu 5 detik.</h1>`;
     }
 
-    return res.send('<center><h1>⏳ Sedang memproses kode...</h1><script>setTimeout(() => window.location.reload(), 3000);</script></center>');
+    // Tombol Reset Sesi (Penting untuk mengatasi kode error)
+    content += `
+        <br><br>
+        <div style="text-align: center; margin-top: 50px; border-top: 1px solid #ccc; padding-top: 20px;">
+            <p>Kode tidak muncul atau tidak bisa dipakai?</p>
+            <a href="/reset" style="background: red; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                🗑️ HAPUS SESI & RESTART
+            </a>
+        </div>
+        <script>setTimeout(() => window.location.reload(), 4000);</script>
+    `;
+
+    return res.send(`<div style="font-family: sans-serif; padding: 20px;">${content}</div>`);
+});
+
+// Route khusus untuk menghapus sesi secara manual
+app.get('/reset', (req, res) => {
+    try {
+        if (fs.existsSync(authFolder)) {
+            fs.rmSync(authFolder, { recursive: true, force: true });
+        }
+        res.send('<h1>✅ Sesi dihapus! Bot sedang restart...</h1><p>Silakan kembali ke halaman utama dalam 10 detik.</p><script>setTimeout(() => window.location.href = "/", 10000);</script>');
+        console.log("Menghapus sesi dan restart...");
+        process.exit(0); // Mematikan proses agar Render menyalakan ulang
+    } catch (error) {
+        res.send(`<h1>Gagal menghapus: ${error.message}</h1>`);
+    }
 });
 
 app.listen(port, () => {
@@ -47,30 +79,30 @@ app.listen(port, () => {
 
 // --- 2. LOGIC BOT ---
 async function connectToWhatsApp() {
-    const authFolder = 'auth_info_baileys';
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
-    const sock = makeWASocket({
+    sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // Kita tidak pakai QR
+        printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ["Ubuntu", "Chrome", "20.0.04"], // Browser standar Linux
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
         connectTimeoutMs: 60000
     });
 
-    // --- LOGIC PAIRING CODE ---
+    // Request Pairing Code hanya jika belum terdaftar
     if (!sock.authState.creds.registered) {
-        // Tunggu sebentar biar socket siap
         setTimeout(async () => {
             try {
-                // Request kode pairing
-                const code = await sock.requestPairingCode(phoneNumber);
-                pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
-                console.log(`✨ KODE PAIRING: ${pairingCode}`);
+                // Pastikan belum connect sebelum request kode
+                if (!isConnected) {
+                    const code = await sock.requestPairingCode(phoneNumber);
+                    pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
+                    console.log(`✨ KODE PAIRING BARU: ${pairingCode}`);
+                }
             } catch (err) {
                 console.error("Gagal request pairing code:", err);
             }
-        }, 5000);
+        }, 4000);
     }
 
     sock.ev.on('creds.update', saveCreds);
@@ -83,39 +115,36 @@ async function connectToWhatsApp() {
             console.log('❌ Koneksi terputus. Reason:', reason);
             
             isConnected = false;
+            pairingCode = null;
 
-            // Hapus sesi jika logout atau banned
+            // Hapus sesi jika logout
             if (reason === DisconnectReason.loggedOut) {
                 console.log('⛔ Logout. Hapus sesi...');
-                fs.rmSync(authFolder, { recursive: true, force: true });
+                if (fs.existsSync(authFolder)) {
+                    fs.rmSync(authFolder, { recursive: true, force: true });
+                }
             }
 
-            // Reconnect
             console.log('🔄 Reconnecting...');
             setTimeout(() => connectToWhatsApp(), 5000);
 
         } else if (connection === 'open') {
             console.log('✅ Tersambung ke WhatsApp! 🚀');
             isConnected = true;
-            pairingCode = null; // Hapus kode setelah connect
+            pairingCode = null;
         }
     });
 
     sock.ev.on('messages.upsert', async m => {
+        // Logic pesan sederhana
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
+        const type = Object.keys(msg.message)[0];
+        const text = type === 'conversation' ? msg.message.conversation : 
+                     type === 'extendedTextMessage' ? msg.message.extendedTextMessage.text : '';
 
-        const messageType = Object.keys(msg.message)[0];
-        const text = messageType === 'conversation' ? msg.message.conversation : 
-                     messageType === 'extendedTextMessage' ? msg.message.extendedTextMessage.text : '';
-
-        if (!text.startsWith('.')) return;
-        const args = text.slice(1).trim().split(/ +/);
-        const command = args.shift().toLowerCase();
-
-        // CONTOH COMMAND
-        if (command === 'ping') {
-            await sock.sendMessage(msg.key.remoteJid, { text: 'Pong via Pairing Code! 🏓' });
+        if (text.toLowerCase() === '.ping') {
+            await sock.sendMessage(msg.key.remoteJid, { text: 'Pong! 🏓' });
         }
     });
 }
