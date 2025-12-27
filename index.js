@@ -14,23 +14,28 @@ const authFolder = 'auth_info_baileys';
 // --- VARIABEL GLOBAL ---
 let pairingCode = null;
 let isConnected = false;
-let sock = null;
+let sock = null; // Variable socket dibuat global agar bisa diakses tombol web
 
 // --- 1. SERVER WEB ---
 app.get('/', async (req, res) => {
     res.setHeader('Content-Type', 'text/html');
 
     let content = '';
+    const styleCenter = 'style="font-family: sans-serif; text-align: center; padding: 20px;"';
+    const btnStyle = 'background-color: #007bff; color: white; padding: 15px 30px; text-decoration: none; font-size: 18px; border-radius: 5px; font-weight: bold; display: inline-block; margin-top: 10px;';
+    const btnResetStyle = 'background-color: #dc3545; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 14px;';
 
     if (isConnected) {
+        // TAMPILAN 1: SUDAH CONNECT
         content = `
-            <div style="background: #d4edda; color: #155724; padding: 20px; border-radius: 10px; text-align: center;">
-                <h1>✅ Bot WhatsApp Aktif!</h1>
+            <div ${styleCenter}>
+                <h1 style="color: green;">✅ Bot WhatsApp Aktif!</h1>
                 <p>Bot sudah terhubung dengan nomor ${phoneNumber}</p>
             </div>`;
     } else if (pairingCode) {
+        // TAMPILAN 2: KODE SUDAH MUNCUL
         content = `
-            <div style="text-align: center;">
+            <div ${styleCenter}>
                 <h1>Kode Pairing Anda:</h1>
                 <div style="background: #f0f0f0; padding: 15px; font-size: 35px; font-weight: bold; letter-spacing: 5px; border: 2px dashed #333; margin: 20px 0;">
                     ${pairingCode}
@@ -38,39 +43,58 @@ app.get('/', async (req, res) => {
                 <p>1. Buka WhatsApp > Perangkat Tertaut > Tautkan Perangkat</p>
                 <p>2. Pilih <b>"Tautkan dengan nomor telepon saja"</b></p>
                 <p>3. Masukkan kode di atas.</p>
-                <p style="color: red;">*Kode akan berubah setiap kali bot restart</p>
+                <p style="color: red; font-size: 12px;">*Kode hilang dalam 30 detik</p>
+                <br>
+                <a href="/" style="${btnStyle} background-color: #6c757d;">🔄 Refresh Halaman</a>
             </div>`;
     } else {
-        content = `<h1>⏳ Sedang memproses kode... Tunggu 5 detik.</h1>`;
+        // TAMPILAN 3: BELUM ADA KODE (STANDBY)
+        content = `
+            <div ${styleCenter}>
+                <h1>🤖 Dashboard Bot WA</h1>
+                <p>Status: <span style="color: orange;">Standby / Disconnected</span></p>
+                <p>Klik tombol di bawah untuk meminta kode baru:</p>
+                <br>
+                <a href="/get-code" style="${btnStyle}">👉 MINTA KODE PAIRING</a>
+                <br><br><br>
+                <p style="font-size: 12px; color: #666;">Jika kode error terus, reset sesi:</p>
+                <a href="/reset" style="${btnResetStyle}">🗑️ HAPUS SESI & RESTART</a>
+            </div>`;
     }
 
-    // Tombol Reset Sesi (Penting untuk mengatasi kode error)
-    content += `
-        <br><br>
-        <div style="text-align: center; margin-top: 50px; border-top: 1px solid #ccc; padding-top: 20px;">
-            <p>Kode tidak muncul atau tidak bisa dipakai?</p>
-            <a href="/reset" style="background: red; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                🗑️ HAPUS SESI & RESTART
-            </a>
-        </div>
-        <script>setTimeout(() => window.location.reload(), 4000);</script>
-    `;
-
-    return res.send(`<div style="font-family: sans-serif; padding: 20px;">${content}</div>`);
+    return res.send(content);
 });
 
-// Route khusus untuk menghapus sesi secara manual
-app.get('/reset', (req, res) => {
-    try {
-        if (fs.existsSync(authFolder)) {
-            fs.rmSync(authFolder, { recursive: true, force: true });
-        }
-        res.send('<h1>✅ Sesi dihapus! Bot sedang restart...</h1><p>Silakan kembali ke halaman utama dalam 10 detik.</p><script>setTimeout(() => window.location.href = "/", 10000);</script>');
-        console.log("Menghapus sesi dan restart...");
-        process.exit(0); // Mematikan proses agar Render menyalakan ulang
-    } catch (error) {
-        res.send(`<h1>Gagal menghapus: ${error.message}</h1>`);
+// --- ROUTE UNTUK TOMBOL MANUAL ---
+
+// 1. Tombol Minta Kode
+app.get('/get-code', async (req, res) => {
+    if (!sock) {
+        return res.send('<h1>Bot belum siap, tunggu 5 detik lalu refresh.</h1>');
     }
+    if (isConnected) {
+        return res.send('<h1>Bot sudah connect kok! Ngapain minta kode lagi?</h1><a href="/">Kembali</a>');
+    }
+
+    try {
+        // INI PROSES REQUEST CODE MANUAL
+        console.log("Tombol ditekan: Meminta Pairing Code...");
+        const code = await sock.requestPairingCode(phoneNumber);
+        pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
+        res.redirect('/'); // Balik ke halaman utama buat liat kode
+    } catch (error) {
+        console.error("Gagal request code:", error);
+        res.send(`<h1 style="color:red">Gagal meminta kode!</h1><p>Error: ${error.message}</p><p>Coba klik tombol Reset Sesi di halaman utama.</p><a href="/">Kembali</a>`);
+    }
+});
+
+// 2. Tombol Reset
+app.get('/reset', (req, res) => {
+    if (fs.existsSync(authFolder)) {
+        fs.rmSync(authFolder, { recursive: true, force: true });
+    }
+    res.send('<h1>Sesi dihapus. Bot Restart...</h1><script>setTimeout(() => window.location.href = "/", 5000);</script>');
+    process.exit(0);
 });
 
 app.listen(port, () => {
@@ -86,24 +110,13 @@ async function connectToWhatsApp() {
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: ["Ubuntu", "Chrome", "20.0.04"],
-        connectTimeoutMs: 60000
+        connectTimeoutMs: 60000,
+        // Supaya tidak retry terlalu agresif
+        retryRequestDelayMs: 5000 
     });
 
-    // Request Pairing Code hanya jika belum terdaftar
-    if (!sock.authState.creds.registered) {
-        setTimeout(async () => {
-            try {
-                // Pastikan belum connect sebelum request kode
-                if (!isConnected) {
-                    const code = await sock.requestPairingCode(phoneNumber);
-                    pairingCode = code?.match(/.{1,4}/g)?.join("-") || code;
-                    console.log(`✨ KODE PAIRING BARU: ${pairingCode}`);
-                }
-            } catch (err) {
-                console.error("Gagal request pairing code:", err);
-            }
-        }, 4000);
-    }
+    // KITA HAPUS BAGIAN "setTimeout requestPairingCode" OTOMATIS DARI SINI
+    // Biarkan tombol web yang melakukan tugas itu.
 
     sock.ev.on('creds.update', saveCreds);
 
@@ -115,17 +128,14 @@ async function connectToWhatsApp() {
             console.log('❌ Koneksi terputus. Reason:', reason);
             
             isConnected = false;
-            pairingCode = null;
+            pairingCode = null; // Reset kode kalau putus
 
-            // Hapus sesi jika logout
             if (reason === DisconnectReason.loggedOut) {
                 console.log('⛔ Logout. Hapus sesi...');
-                if (fs.existsSync(authFolder)) {
-                    fs.rmSync(authFolder, { recursive: true, force: true });
-                }
+                if (fs.existsSync(authFolder)) fs.rmSync(authFolder, { recursive: true, force: true });
             }
 
-            console.log('🔄 Reconnecting...');
+            // Reconnect
             setTimeout(() => connectToWhatsApp(), 5000);
 
         } else if (connection === 'open') {
@@ -136,7 +146,6 @@ async function connectToWhatsApp() {
     });
 
     sock.ev.on('messages.upsert', async m => {
-        // Logic pesan sederhana
         const msg = m.messages[0];
         if (!msg.message || msg.key.fromMe) return;
         const type = Object.keys(msg.message)[0];
@@ -144,7 +153,7 @@ async function connectToWhatsApp() {
                      type === 'extendedTextMessage' ? msg.message.extendedTextMessage.text : '';
 
         if (text.toLowerCase() === '.ping') {
-            await sock.sendMessage(msg.key.remoteJid, { text: 'Pong! 🏓' });
+            await sock.sendMessage(msg.key.remoteJid, { text: 'Pong Manual Mode! 🏓' });
         }
     });
 }
