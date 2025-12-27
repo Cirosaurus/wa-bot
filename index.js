@@ -1,16 +1,57 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const express = require('express');
-const qrcode = require('qrcode-terminal'); 
+const qrcode = require('qrcode'); // Library pengubah text jadi gambar
 const { Sticker, StickerTypes } = require('wa-sticker-formatter');
-const fs = require('fs'); // <--- TAMBAHAN 1: Import Module File System
+const fs = require('fs');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// --- 1. SERVER WEB PANCINGAN ---
-app.get('/', (req, res) => {
-    res.send('Bot WhatsApp sedang berjalan! 🤖');
+// Variabel Global
+let qrCodeData = null; // Menyimpan kode QR
+let isConnected = false; // Status koneksi
+
+// --- 1. SERVER WEB (TAMPILAN QR) ---
+app.get('/', async (req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+
+    // Tampilan jika sudah connect
+    if (isConnected) {
+        return res.send(`
+            <center>
+                <h1>✅ Bot WhatsApp Aktif!</h1>
+                <p>Status: Terhubung ke WhatsApp Server</p>
+            </center>
+        `);
+    }
+
+    // Tampilan jika ada QR Code
+    if (qrCodeData) {
+        try {
+            // Ubah kode QR menjadi gambar (Data URL)
+            const qrImage = await qrcode.toDataURL(qrCodeData);
+            return res.send(`
+                <center>
+                    <h1>Scan QR Code di Bawah ini</h1>
+                    <img src="${qrImage}" alt="QR Code" style="width: 300px; height: 300px;"/>
+                    <p>Halaman ini akan refresh otomatis dalam 5 detik...</p>
+                    <script>setTimeout(() => window.location.reload(), 5000);</script>
+                </center>
+            `);
+        } catch (err) {
+            return res.send('<center><h1>Gagal generate gambar QR</h1></center>');
+        }
+    }
+
+    // Tampilan jika sedang loading
+    return res.send(`
+        <center>
+            <h1>⏳ Sedang Memuat...</h1>
+            <p>Menunggu QR Code dari WhatsApp...</p>
+            <script>setTimeout(() => window.location.reload(), 3000);</script>
+        </center>
+    `);
 });
 
 app.listen(port, () => {
@@ -19,60 +60,51 @@ app.listen(port, () => {
 
 // --- 2. LOGIC BOT WHATSAPP ---
 async function connectToWhatsApp() {
-    // Nama folder sesi (disimpan di variabel agar konsisten)
     const authFolder = 'auth_info_baileys';
 
-    // <--- TAMBAHAN 2: LOGIKA PEMBERSIH SESI ---
-    // Cek apakah folder sesi ada? Jika ada, hapus paksa agar minta QR baru.
-    try {
-        if (fs.existsSync(authFolder)) {
-            fs.rmSync(authFolder, { recursive: true, force: true });
-            console.log('🗑️ Sesi lama berhasil dihapus. Meminta QR Code baru...');
-        }
-    } catch (error) {
-        console.error('Gagal menghapus sesi lama:', error);
-    }
-    // -------------------------------------------
+    // Hapus sesi HANYA jika folder auth rusak/perlu reset manual
+    // Di Render Free, folder ini otomatis hilang saat deploy ulang,
+    // jadi kita tidak perlu kode delete paksa di sini agar tidak looping.
 
-    // Gunakan variabel authFolder yang sudah didefinisikan di atas
     const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, 
+        printQRInTerminal: false, // Matikan QR terminal
         logger: pino({ level: 'silent' }),
         browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        // Tambahkan timeout koneksi agar lebih stabil
         connectTimeoutMs: 60000 
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    // Cek koneksi & Generate QR Manual
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
         
-        // --- BAGIAN INI UNTUK MEMUNCULKAN QR CODE ---
+        // Simpan QR ke variabel global agar bisa diambil browser
         if (qr) {
-            console.log('Scan QR Code di bawah ini:');
-            qrcode.generate(qr, { small: true });
+            console.log('QR Code baru diterima! Silakan buka website.');
+            qrCodeData = qr;
         }
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
             console.log('Koneksi terputus. Reconnecting:', shouldReconnect);
             
-            // Reconnect jika bukan logout
+            isConnected = false;
+            // Jangan hapus qrCodeData di sini agar user masih bisa lihat last QR jika perlu
+
             if (shouldReconnect) {
-                // Beri jeda 3 detik sebelum connect ulang agar tidak spamming
                 setTimeout(() => connectToWhatsApp(), 3000);
             }
         } else if (connection === 'open') {
             console.log('Tersambung ke WhatsApp! 🚀');
+            isConnected = true;
+            qrCodeData = null; // Hapus QR agar tidak muncul lagi
         }
     });
 
-    // Membaca pesan
+    // --- LOGIC PESAN ---
     sock.ev.on('messages.upsert', async m => {
         const msg = m.messages[0];
         if (!msg.message) return;
@@ -82,7 +114,6 @@ async function connectToWhatsApp() {
         const text = messageType === 'conversation' ? msg.message.conversation : 
                      messageType === 'extendedTextMessage' ? msg.message.extendedTextMessage.text : '';
 
-        // Prefix Check
         const prefix = '.'; 
         if (!text.startsWith(prefix)) return;
 
@@ -93,22 +124,16 @@ async function connectToWhatsApp() {
             case 'ping':
                 await sock.sendMessage(msg.key.remoteJid, { text: 'Pong! 🏓' });
                 break;
-
-            case 'help':
-            case 'menu':
-                await sock.sendMessage(msg.key.remoteJid, { text: 'Menu: .ping, .sticker' });
-                break;
-
             case 'sticker':
             case 's':
+                // ... (Kode sticker sama seperti sebelumnya) ...
                 const isImage = msg.message.imageMessage;
                 const isQuotedImage = msg.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
-
+                
                 if (!isImage && !isQuotedImage) {
-                    await sock.sendMessage(msg.key.remoteJid, { text: 'Kirim/Reply gambar dengan caption .sticker' });
+                    await sock.sendMessage(msg.key.remoteJid, { text: 'Kirim gambar dengan caption .sticker' });
                     return;
                 }
-
                 try {
                     let messageToDownload;
                     if (isImage) {
@@ -118,21 +143,18 @@ async function connectToWhatsApp() {
                             message: msg.message.extendedTextMessage.contextInfo.quotedMessage
                         };
                     }
-
                     const buffer = await downloadMediaMessage(
                         messageToDownload,
                         'buffer',
-                        { },
+                        {},
                         { logger: pino({ level: 'silent' }) }
                     );
-
                     const sticker = new Sticker(buffer, {
                         pack: 'Bot Sticker',
                         author: 'Bot Render',
                         type: StickerTypes.FULL,
                         quality: 50
                     });
-
                     await sock.sendMessage(msg.key.remoteJid, await sticker.toMessage());
                 } catch (error) {
                     console.log("Error sticker:", error);
