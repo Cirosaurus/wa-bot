@@ -1,8 +1,9 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const express = require('express');
-const qrcode = require('qrcode-terminal'); // Pastikan ini ada
+const qrcode = require('qrcode-terminal'); 
 const { Sticker, StickerTypes } = require('wa-sticker-formatter');
+const fs = require('fs'); // <--- TAMBAHAN 1: Import Module File System
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -18,14 +19,31 @@ app.listen(port, () => {
 
 // --- 2. LOGIC BOT WHATSAPP ---
 async function connectToWhatsApp() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+    // Nama folder sesi (disimpan di variabel agar konsisten)
+    const authFolder = 'auth_info_baileys';
+
+    // <--- TAMBAHAN 2: LOGIKA PEMBERSIH SESI ---
+    // Cek apakah folder sesi ada? Jika ada, hapus paksa agar minta QR baru.
+    try {
+        if (fs.existsSync(authFolder)) {
+            fs.rmSync(authFolder, { recursive: true, force: true });
+            console.log('🗑️ Sesi lama berhasil dihapus. Meminta QR Code baru...');
+        }
+    } catch (error) {
+        console.error('Gagal menghapus sesi lama:', error);
+    }
+    // -------------------------------------------
+
+    // Gunakan variabel authFolder yang sudah didefinisikan di atas
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: false, // KITA MATIKAN FITUR LAMA
+        printQRInTerminal: false, 
         logger: pino({ level: 'silent' }),
-        // GANTI BROWSER KE UBUNTU AGAR TIDAK DIBLOKIR RENDER
-        browser: ['Ubuntu', 'Chrome', '20.0.04'] 
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        // Tambahkan timeout koneksi agar lebih stabil
+        connectTimeoutMs: 60000 
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -46,7 +64,8 @@ async function connectToWhatsApp() {
             
             // Reconnect jika bukan logout
             if (shouldReconnect) {
-                connectToWhatsApp();
+                // Beri jeda 3 detik sebelum connect ulang agar tidak spamming
+                setTimeout(() => connectToWhatsApp(), 3000);
             }
         } else if (connection === 'open') {
             console.log('Tersambung ke WhatsApp! 🚀');
